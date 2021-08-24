@@ -10,7 +10,7 @@ from merakicommons.container import searchable, SearchableList, SearchableLazyLi
 
 from .. import configuration
 from .staticdata import Versions
-from ..data import Region, Platform, Tier, GameType, GameMode, Queue, Side, Season, Lane, Role, Key, SummonersRiftArea, Tower
+from ..data import Region, Platform, Continent, Tier, GameType, GameMode, Queue, MatchType, Side, Season, Lane, Role, Key, SummonersRiftArea, Tower
 from .common import CoreData, CoreDataList, CassiopeiaObject, CassiopeiaGhost, CassiopeiaLazyList, provide_default_region, ghost_load_on
 from ..dto import match as dto
 from .patch import Patch
@@ -153,47 +153,40 @@ class ParticipantStatsData(CoreData):
 
 
 class ParticipantData(CoreData):
-    _renamed = {"participantId": "id", "spell1Id": "summonerSpellDId", "spell2Id": "summonerSpellFId", "highestAchievedSeasonTier": "rankLastSeason", "bot": "isBot", "profileIcon": "profileIconId"}
+    _renamed = {"summoner1Id": "summonerSpellDId", "summoner2Id": "summonerSpellFId", "bot": "isBot", "profileIcon": "profileIconId", "gameEndedInEarlySurrender": "endedInEarlySurrender", "gameEndedInSurrender": "endedInSurrender"}
 
     def __call__(self, **kwargs):
-        if "stats" in kwargs:
-            stats = kwargs.pop("stats")
-            if "perk0" in stats:  # Assume all the rest are too
-                self.runes = {
-                    stats.pop("perk0"): [stats.pop("perk0Var1"), stats.pop("perk0Var2"), stats.pop("perk0Var3")],
-                    stats.pop("perk1"): [stats.pop("perk1Var1"), stats.pop("perk1Var2"), stats.pop("perk1Var3")],
-                    stats.pop("perk2"): [stats.pop("perk2Var1"), stats.pop("perk2Var2"), stats.pop("perk2Var3")],
-                    stats.pop("perk3"): [stats.pop("perk3Var1"), stats.pop("perk3Var2"), stats.pop("perk3Var3")],
-                    stats.pop("perk4"): [stats.pop("perk4Var1"), stats.pop("perk4Var2"), stats.pop("perk4Var3")],
-                    stats.pop("perk5"): [stats.pop("perk5Var1"), stats.pop("perk5Var2"), stats.pop("perk5Var3")],
-                }
-                self.stat_runes = [
-                    stats.pop("statPerk0", None),
-                    stats.pop("statPerk1", None),
-                    stats.pop("statPerk2", None),
-                ]
-                stats.pop("runes", None)
-            self.stats = ParticipantStatsData(**stats)
+        perks = kwargs.pop("perks", {})
+        stat_perks = perks.pop("statPerks", {})
+        styles = perks.pop("styles", {}).get("selections", [])  # Getting the selections drops some minor info
+        self.perks = {style["perk"]: [style.pop("var1"), style.pop("var2"), style.pop("var3")] for style in styles}
+        self.stat_perks = stat_perks
+        # self.stats = ParticipantStatsData(**stats)  # TODO: Figure out what we want to do with particpant stats now that they have moved onto the participant
         if "timeline" in kwargs:
             self.timeline = ParticipantTimelineData(**kwargs.pop("timeline"))
         if "teamId" in kwargs:
             self.side = Side(kwargs.pop("teamId"))
 
-        if "player" in kwargs:
-            for key, value in kwargs.pop("player").items():
-                kwargs[key] = value
         super().__call__(**kwargs)
         return self
+
+
+class BanData(CoreData):
+    _renamed = {}
+
+
+class ObjectiveData(CoreData):
+    _renamed = {}
 
 
 class TeamData(CoreData):
     _renamed = {"dominionVictoryScore": "dominionScore", "firstBaron": "firstBaronKiller", "firstBlood": "firstBloodKiller", "firstDragon": "firstDragonKiller", "firstInhibitor": "firstInhibitorKiller", "firstRiftHerald": "firstRiftHeraldKiller", "firstTower": "firstTowerKiller"}
 
     def __call__(self, **kwargs):
-        if "bans" in kwargs:
-            self.bans = [ban["championId"] for ban in kwargs.pop("bans")]
+        self.bans = [BanData(**ban) for ban in kwargs.pop("bans", [])]
+        self.objectives = {key: ObjectiveData(**obj) for key, obj in kwargs.pop("objectives", {}).items()}
         if "win" in kwargs:
-            self.isWinner = kwargs.pop("win") != "Fail"
+            self.isWinner = kwargs.pop("win")
         if "teamId" in kwargs:
             self.side = Side(kwargs.pop("teamId"))
         super().__call__(**kwargs)
@@ -201,61 +194,40 @@ class TeamData(CoreData):
 
 
 class MatchReferenceData(CoreData):
-    _renamed = {"account_id": "accountId", "gameId": "id", "champion": "championId", "teamId": "side", "platformId": "platform"}
-
-    def __call__(self, **kwargs):
-        if "timestamp" in kwargs:
-            self.creation = arrow.get(kwargs.pop("timestamp") / 1000)
-
-            # Set lane and role if they are missing from the data
-            if "lane" not in kwargs:
-                kwargs["lane"] = None
-            if "role" not in kwargs:
-                kwargs["role"] = None
-        super().__call__(**kwargs)
-        return self
+    _renamed = {"matchId": "id"}
 
 
 class MatchData(CoreData):
     _dto_type = dto.MatchDto
-    _renamed = {"gameId": "id", "gameVersion": "version", "gameMode": "mode", "gameType": "type", "queueId": "queue", "seasonId": "season"}
+    _renamed = {"gameId": "id", "gameVersion": "version", "gameMode": "mode", "gameType": "type", "gameName": "name", "queueId": "queue"}
 
     def __call__(self, **kwargs):
         if "gameCreation" in kwargs:
             self.creation = arrow.get(kwargs["gameCreation"] / 1000)
         if "gameDuration" in kwargs:
             self.duration = datetime.timedelta(seconds=kwargs["gameDuration"])
+        if "gameStartTimestamp" in kwargs:
+            self.start = arrow.get(kwargs["gameStartTimestamp"] / 1000)
 
-        if "participants" in kwargs:
-            good_participant_ids = []
-            for participant in kwargs["participants"]:
-                for pid in kwargs["participantIdentities"]:
-                    if participant["participantId"] == pid["participantId"] and "player" in pid:
-                        good_participant_ids.append(participant["participantId"])
-                        participant["player"] =  pid["player"]
-                        break
-            self.privateGame = False
-            if len(good_participant_ids) == 0:
-                self.privateGame = True
-            # For each participant id we found that has both a participant and an identity, add it to the match data's participants
-            self.participants = []
-            for participant in kwargs["participants"]:
-                if self.privateGame or participant["participantId"] in good_participant_ids:
-                    participant = ParticipantData(**participant)
-                    self.participants.append(participant)
-            assert len(self.participants) == len(kwargs["participants"])
-            kwargs.pop("participants")
-            kwargs.pop("participantIdentities")
+        participants = kwargs.pop("participants", [])
+        puuids = set([p.get("puuid", None) for p in participants])
+        self.privateGame = False
+        if len(puuids) == 1:
+            self.privateGame = True
+        self.participants = []
+        for participant in participants:
+            participant = ParticipantData(**participant)
+            self.participants.append(participant)
 
-        if "teams" in kwargs:
-            self.teams = []
-            for team in kwargs.pop("teams"):
-                team_side = Side(team["teamId"])
-                participants = []
-                for participant in self.participants:
-                    if participant.side is team_side:
-                        participants.append(participant)
-                self.teams.append(TeamData(**team, participants=participants))
+        teams = kwargs.pop("teams", [])
+        self.teams = []
+        for team in teams:
+            team_side = Side(team["teamId"])
+            participants = []
+            for participant in self.participants:
+                if participant.side is team_side:
+                    participants.append(participant)
+            self.teams.append(TeamData(**team, participants=participants))
 
         super().__call__(**kwargs)
         return self
@@ -270,60 +242,32 @@ class MatchHistory(CassiopeiaLazyList):  # type: List[Match]
     """The match history for a summoner. By default, this will return the entire match history."""
     _data_types = {MatchListData}
 
-    def __init__(self, *, summoner: Summoner, begin_index: int = None, end_index: int = None, begin_time: arrow.Arrow = None, end_time: arrow.Arrow = None, queues: Set[Queue] = None, seasons: Set[Season] = None, champions: Set[Champion] = None):
+    def __init__(self, *, summoner: Summoner, begin_index: int = None, end_index: int = None, queue: Queue = None, type: MatchType = None):
         assert end_index is None or end_index > begin_index
-        if begin_time is not None and end_time is not None and begin_time > end_time:
-            raise ValueError("`end_time` should be greater than `begin_time`")
-        kwargs = {"region": summoner.region}
-        kwargs["queues"] = queues or []
-        kwargs["seasons"] = seasons or []
-        champions = champions or []
-        kwargs["championIds"] = [champion.id if isinstance(champion, Champion) else champion for champion in champions]
+        kwargs = {"continent": summoner.region.continent}
+        kwargs["queue"] = queue
+        kwargs["type"] = type
         kwargs["begin_index"] = begin_index
         kwargs["end_index"] = end_index
-        if begin_time is not None and not isinstance(begin_time, (int, float)):
-            begin_time = begin_time.int_timestamp * 1000
-        kwargs["begin_time"] = begin_time
-        if end_time is not None and not isinstance(end_time, (int, float)):
-            end_time = end_time.int_timestamp * 1000
-        kwargs["end_time"] = end_time
         assert isinstance(summoner, Summoner)
-        self.__account_id_callable = lambda: summoner.account_id
+        self.__puuid_callable = lambda: summoner.puuid
         self.__summoner = summoner
         CassiopeiaObject.__init__(self, **kwargs)
 
     @classmethod
-    def __get_query_from_kwargs__(cls, *, summoner: Summoner, begin_index: int = None, end_index: int = None, begin_time: arrow.Arrow = None, end_time: arrow.Arrow = None, queues: Set[Queue] = None, seasons: Set[Season] = None, champions: Set[Champion] = None):
+    def __get_query_from_kwargs__(cls, *, summoner: Summoner, begin_index: int = None, end_index: int = None, queue: Queue = None, type: MatchType = None):
         assert isinstance(summoner, Summoner)
-        query = {"region": summoner.region}
-        query["accountId"] = summoner.account_id
+        query = {"continent": summoner.region.continent}
+        query["puuid"] = summoner.puuid
 
         if begin_index is not None:
             query["beginIndex"] = begin_index
 
         if end_index is not None:
-            query["endIndex"] = end_index
+            query["endIndex"] = end_index  # TODO: Figure out how we want this to work with maxNumberOfMatches
 
-        if begin_time is not None:
-            if isinstance(begin_time, arrow.Arrow):
-                begin_time = begin_time.int_timestamp * 1000
-            query["beginTime"] = begin_time
-
-        if end_time is not None:
-            if isinstance(end_time, arrow.Arrow):
-                end_time = end_time.int_timestamp * 1000
-            query["endTime"] = end_time
-
-        if queues is not None:
-            query["queues"] = queues
-
-        if seasons is not None:
-            query["seasons"] = seasons
-
-        if champions is not None:
-            champions = [champion.id if isinstance(champion, Champion) else champion for champion in champions]
-            query["champion.ids"] = champions
-
+        query["queue"] = queue
+        query["type"] = type
         return query
 
     @classmethod
@@ -335,45 +279,37 @@ class MatchHistory(CassiopeiaLazyList):  # type: List[Match]
         return self
 
     def __call__(self, **kwargs) -> "MatchHistory":
-        # summoner, begin_index, end_index, begin_time, end_time, queues, seasons, champions
         kwargs.setdefault("summoner", self.__summoner)
         kwargs.setdefault("begin_index", self.begin_index)
         kwargs.setdefault("end_index", self.end_index)
-        kwargs.setdefault("begin_time", self.begin_time)
-        kwargs.setdefault("end_time", self.end_time)
-        kwargs.setdefault("queues", self.queues)
-        kwargs.setdefault("seasons", self.seasons)
-        kwargs.setdefault("champions", self.champions)
+        kwargs.setdefault("queue", self.queue)
+        kwargs.setdefault("type", self.type)
         return MatchHistory(**kwargs)
 
     @property
-    def _account_id(self):
+    def _puuid(self):  # TODO: I don't think we need this anymore
         try:
-            return self.__account_id
+            return self.__puuid
         except AttributeError:
-            self.__account_id = self.__account_id_callable()
-            del self.__account_id_callable  # This releases the reference to the summoner
-            return self.__account_id
+            self.__puuid = self.__puuid_callable()
+            del self.__puuid_callable  # This releases the reference to the summoner
+            return self.__puuid
 
     @lazy_property
-    def region(self) -> Region:
-        return Region(self._data[MatchListData].region)
+    def continent(self) -> Continent:
+        return Continent(self._data[MatchListData].continent)
 
     @lazy_property
     def platform(self) -> Platform:
         return self.region.platform
 
     @lazy_property
-    def queues(self) -> Set[Queue]:
-        return {Queue(q) for q in self._data[MatchListData].queues}
+    def queue(self) -> Queue:
+        return Queue(self._data[MatchListData].queue)
 
     @lazy_property
-    def seasons(self) -> Set[Season]:
-        return {Season(s) for s in self._data[MatchListData].seasons}
-
-    @lazy_property
-    def champions(self) -> Set[Champion]:
-        return {Champion(id=cid, region=self.region) for cid in self._data[MatchListData].championIds}
+    def type(self) -> MatchType:
+        return MatchType(self._data[MatchListData].type)
 
     @property
     def begin_index(self) -> Union[int, None]:
@@ -388,18 +324,6 @@ class MatchHistory(CassiopeiaLazyList):  # type: List[Match]
             return self._data[MatchListData].endIndex
         except AttributeError:
             return None
-
-    @property
-    def begin_time(self) -> arrow.Arrow:
-        time = self._data[MatchListData].begin_time
-        if time is not None:
-            return arrow.get(time / 1000)
-
-    @property
-    def end_time(self) -> arrow.Arrow:
-        time = self._data[MatchListData].end_time
-        if time is not None:
-            return arrow.get(time / 1000)
 
 
 class Position(CassiopeiaObject):
@@ -1528,55 +1452,42 @@ class Team(CassiopeiaObject):
         return SearchableList([Participant.from_data(p, match=self.__match) for p in self._data[TeamData].participants])
 
 
-@searchable({str: ["participants", "region", "platform", "season", "queue", "mode", "map", "type"], Region: ["region"], Platform: ["platform"], Season: ["season"], Queue: ["queue"], GameMode: ["mode"], Map: ["map"], GameType: ["type"], Item: ["participants"], Champion: ["participants"], Patch: ["patch"], Summoner: ["participants"], SummonerSpell: ["participants"]})
+@searchable({str: ["participants", "continent", "queue", "mode", "map", "type"], Continent: ["continent"], Queue: ["queue"], MatchType: ["type"], GameMode: ["mode"], Map: ["map"], GameType: ["type"], Item: ["participants"], Patch: ["patch"], Summoner: ["participants"], SummonerSpell: ["participants"]})
 class Match(CassiopeiaGhost):
     _data_types = {MatchData}
 
     @provide_default_region
-    def __init__(self, *, id: int = None, region: Union[Region, str] = None):
-        kwargs = {"region": region, "id": id}
+    def __init__(self, *, id: int = None, continent: Union[Continent, str] = None):
+        kwargs = {"continent": continent, "id": id}
         super().__init__(**kwargs)
         self.__participants = []  # For lazy-loading the participants in a special way
         self._timeline = None
 
     def __get_query__(self):
-        return {"region": self.region, "platform": self.platform, "id": self.id}
+        return {"continent": self.continent, "id": self.id}
 
     @classmethod
     def from_match_reference(cls, ref: MatchReferenceData):
-        instance = cls(id=ref.id, region=ref.region)
-        # The below line is necessary because it's possible to pull this match from the cache (which has Match core objects in it).
-        # In that case, the data will already be loaded and we don't want to overwrite anything.
-        if not hasattr(instance._data[MatchData], "participants"):
-            participant = {"participantId": None, "championId": ref.championId, "timeline": {"lane": ref.lane, "role": ref.role}}
-            player = {"participantId": None, "currentAccountId": ref.accountId, "currentPlatformId": ref.platform}
-            instance(season=ref.season, queue=ref.queue, creation=ref.creation)
-            instance._data[MatchData](participants=[participant],
-                                      participantIdentities=[{"participantId": None, "player": player, "bot": False}])
+        instance = cls(id=ref.id, continent=ref.continent)
         instance._timeline = None
         return instance
 
     def __eq__(self, other: "Match"):
-        if not isinstance(other, Match) or self.region != other.region:
+        if not isinstance(other, Match) or self.continent != other.continent:
             return False
         return self.id == other.id
 
     def __str__(self):
-        region = self.region
+        continent = self.continent
         id_ = self.id
-        return "Match(id={id_}, region='{region}')".format(id_=id_, region=region.value)
+        return "Match(id={id_}, region='{continent}')".format(id_=id_, continent=continent.value)
 
     __hash__ = CassiopeiaGhost.__hash__
 
     @lazy_property
-    def region(self) -> Region:
-        """The region for this match."""
-        return Region(self._data[MatchData].region)
-
-    @property
-    def platform(self) -> Platform:
-        """The platform for this match."""
-        return self.region.platform
+    def continent(self) -> Continent:
+        """The continent for this match."""
+        return Continent(self._data[MatchData].continent)
 
     @property
     def id(self) -> int:
@@ -1591,57 +1502,32 @@ class Match(CassiopeiaGhost):
     @CassiopeiaGhost.property(MatchData)
     @ghost_load_on
     @lazy
-    def season(self) -> Season:
-        return Season.from_id(self._data[MatchData].season)
-
-    @CassiopeiaGhost.property(MatchData)
-    @ghost_load_on
-    @lazy
     def queue(self) -> Queue:
         return Queue.from_id(self._data[MatchData].queue)
 
     @CassiopeiaGhost.property(MatchData)
     @ghost_load_on
-    # This method is lazy-loaded in a special way because of its unique behavior
-    def participants(self) -> List[Participant]:
-        # This is a complicated function because we don't want to load the particpants if the only one the user cares about is the one loaded from a match ref
+    @lazy
+    def type(self) -> MatchType:
+        return MatchType.from_id(self._data[MatchData].type)
 
+    @CassiopeiaGhost.property(MatchData)
+    @ghost_load_on
+    def participants(self) -> List[Participant]:
         def generate_participants(match):
             if not hasattr(match._data[MatchData], "participants"):
-                empty_match = True
-            else:
-                empty_match = False
-
-            # If a participant was provided from a matchref, yield that first
-            yielded_one = False
-            if not empty_match and len(match._data[MatchData].participants) == 1:
-                yielded_one = True
-                try:
-                    yield match.__participants[0]
-                except IndexError:
-                    p = match._data[MatchData].participants[0]
-                    participant = Participant.from_data(p, match=match)
-                    match.__participants.append(participant)
-                    yield participant
-
-            # Create all the participants if any haven't been created yet.
-            # Note that it's important to overwrite the one from the matchref if it was loaded because we have more data after we load the full match.
-            if empty_match or yielded_one or len(match.__participants) < len(match._data[MatchData].participants):
+                match.__participants = []
+            elif len(match.__participants) < len(match._data[MatchData].participants):
+                # Create all the participants if they haven't been created already
                 if not match._Ghost__is_loaded(MatchData):
                     match.__load__(MatchData)
                     match._Ghost__set_loaded(MatchData)  # __load__ doesn't trigger __set_loaded.
-                for i, p in enumerate(match._data[MatchData].participants):
+                for p in match._data[MatchData].participants:
                     participant = Participant.from_data(p, match=match)
-                    # If we already have this participant in the list, replace it so it stays in the same position
-                    for j, pold in enumerate(match.__participants):
-                        if hasattr(pold._data[ParticipantData], "currentAccountId") and hasattr(participant._data[ParticipantData], "currentAccountId") and pold._data[ParticipantData].currentAccountId == participant._data[ParticipantData].currentAccountId:
-                            match.__participants[j] = participant
-                            break
-                    else:
-                        match.__participants.append(participant)
+                    match.__participants.append(participant)
 
-            # Yield the rest of the participants
-            for participant in match.__participants[yielded_one:]:
+            # Yield the participants
+            for participant in match.__participants:
                 yield participant
 
         return SearchableLazyList(generate_participants(self))
@@ -1697,7 +1583,7 @@ class Match(CassiopeiaGhost):
     @CassiopeiaGhost.property(MatchData)
     @ghost_load_on
     @lazy
-    def type(self) -> GameType:
+    def type(self) -> GameType:  # TODO: Figure out how to handle this duplicate property name
         return GameType(self._data[MatchData].type)
 
     @CassiopeiaGhost.property(MatchData)
@@ -1712,9 +1598,15 @@ class Match(CassiopeiaGhost):
     def creation(self) -> arrow.Arrow:
         return self._data[MatchData].creation
 
+    @CassiopeiaGhost.property(MatchData)
+    @ghost_load_on
+    @lazy
+    def start(self) -> arrow.Arrow:
+        return self._data[MatchData].start
+
     @property
     def is_remake(self) -> bool:
-        return self.duration < datetime.timedelta(minutes=5)
+        return self._data[MatchData].endedInEarlySurrender
 
     @property
     def exists(self) -> bool:

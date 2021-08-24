@@ -1,21 +1,14 @@
 from time import time
-from typing import Type, TypeVar, MutableMapping, Any, Iterable, Generator, Union
-import arrow
-import datetime
-import math
+from typing import Type, TypeVar, MutableMapping, Any, Iterable, Generator
 
 from datapipelines import DataSource, PipelineContext, Query, NotFoundError, validate_query
 
 from .common import RiotAPIService, APINotFoundError
-from ...data import Platform, Season, Queue, SEASON_IDS, QUEUE_IDS
+from ...data import Platform, Continent, Queue, MatchType, QUEUE_IDS
 from ...dto.match import MatchDto, MatchListDto, TimelineDto
 from ..uniquekeys import convert_region_to_platform
 
 T = TypeVar("T")
-
-
-def _get_current_time(query: MutableMapping[str, Any], context: PipelineContext = None) -> int:
-    return int(time()) * 1000
 
 
 class MatchAPI(RiotAPIService):
@@ -34,19 +27,24 @@ class MatchAPI(RiotAPIService):
     @get.register(MatchDto)
     @validate_query(_validate_get_match_query, convert_region_to_platform)
     def get_match(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> MatchDto:
-        url = "https://{platform}.api.riotgames.com/lol/match/v4/matches/{id}".format(platform=query["platform"].value.lower(), id=query["id"])
+        continent = Continent(query["continent"])
+        id = query["id"]
+        url = f"https://{continent}.api.riotgames.com/lol/match/v5/matches/{id}"
         try:
-            app_limiter, method_limiter = self._get_rate_limiter(query["platform"], "matches/id")
+            app_limiter, method_limiter = self._get_rate_limiter(continent.value, "matches/id")
             data = self._get(url, {}, app_limiter=app_limiter, method_limiter=method_limiter)
+            # metadata = data["metadata"]
+            data = data["info"]  # Drop the metadata
         except APINotFoundError as error:
             raise NotFoundError(str(error)) from error
 
-        data["gameId"] = query["id"]
-        data["region"] = query["platform"].region.value
-        for p in data["participantIdentities"]:
-            aid = p.get("player", {}).get("currentAccountId", None)
-            if aid == 0:
-                p["player"]["bot"] = True
+        data["continent"] = continent.value
+        for p in data["participants"]:
+            puuid = p.get("puuid", None)
+            if puuid is None:  # TODO: Figure out what bots are marked as in match-v5
+                p["bot"] = True
+            else:
+                p["bot"] = False
         return MatchDto(data)
 
     _validate_get_many_match_query = Query. \
@@ -79,160 +77,69 @@ class MatchAPI(RiotAPIService):
         return generator()
 
     _validate_get_match_list_query = Query. \
-        has("accountId").as_(str).also. \
-        has("platform").as_(Platform).also. \
-        has("beginTime").as_(int).also. \
-        can_have("endTime").as_(int).also. \
+        has("puuid").as_(str).also. \
+        has("continent").as_(Continent).also. \
         has("beginIndex").as_(int).also. \
         has("maxNumberOfMatches").as_(float).also. \
-        can_have("seasons").as_(Iterable).also. \
-        can_have("champion.ids").as_(Iterable).also. \
-        can_have("queues").as_(Iterable)
+        can_have("queue").as_(Iterable).also. \
+        has("types").as_(Iterable)
 
     @get.register(MatchListDto)
     @validate_query(_validate_get_match_list_query, convert_region_to_platform)
     def get_match_list(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> MatchListDto:
         params = {}
+        params["puuid"] = query["puuid"]
 
         riot_index_interval = 100
-        riot_date_interval = datetime.timedelta(days=7)
+        params["start"] = query["beginIndex"]
+        params["count"] = query["maxNumberOfMatches"] or riot_index_interval
 
-        begin_time = query["beginTime"]  # type: arrow.Arrow
-        end_time = query.get("endTime", arrow.now())  # type: arrow.Arrow
-        if isinstance(begin_time, int):
-            begin_time = arrow.get(begin_time / 1000)
-        if isinstance(end_time, int):
-            end_time = arrow.get(end_time / 1000)
-
-        def determine_calling_method(begin_time, end_time) -> str:
-            """Returns either "by_date" or "by_index"."""
-            matches_per_date_interval = 10  # This is an assumption
-            seconds_per_day = (60 * 60 * 24)
-            riot_date_interval_in_days = riot_date_interval.total_seconds() / seconds_per_day  # in units of days
-            npulls_by_date = (end_time - begin_time).total_seconds() / seconds_per_day / riot_date_interval_in_days
-            npulls_by_index = (arrow.now() - begin_time).total_seconds() / seconds_per_day / riot_date_interval_in_days * matches_per_date_interval / riot_index_interval
-            if math.ceil(npulls_by_date) < math.ceil(npulls_by_index):
-                by = "by_date"
-            else:
-                by = "by_index"
-            return by
-
-        calling_method = determine_calling_method(begin_time, end_time)
-
-        if calling_method == "by_date":
-            params["beginTime"] = begin_time.int_timestamp * 1000
-            if "endTime" in query:
-                params["endTime"] = min((begin_time + riot_date_interval).int_timestamp * 1000, query["endTime"])
-            else:
-                params["endTime"] = (begin_time + riot_date_interval).int_timestamp * 1000
+        if "queue" in query:
+            queue = Queue(query["queues"])
+            params["queue"] = QUEUE_IDS[queue]
         else:
-            params["beginIndex"] = query["beginIndex"]
-            params["endIndex"] = query["beginIndex"] + min(riot_index_interval, query["maxNumberOfMatches"])
-            params["endIndex"] = int(params["endIndex"])
+            queue = set()
+        params["queue"] = queue
 
-        if "seasons" in query:
-            seasons = {Season(season) for season in query["seasons"]}
-            params["season"] = {SEASON_IDS[season] for season in seasons}
+        if "type" in query:
+            type_ = MatchType(query["type"])
         else:
-            seasons = set()
+            type_ = set()
+        params["type"] = type_
 
-        if "champion.ids" in query:
-            champions = query["champion.ids"]
-            params["champion"] = champions
-        else:
-            champions = set()
+        continent: Continent = query["continent"]
+        puuid: str = params["puuid"]
+        start: int = params["start"]
+        count: int = params["count"]
 
-        if "queues" in query:
-            queues = {Queue(queue) for queue in query["queues"]}
-            params["queue"] = {QUEUE_IDS[queue] for queue in queues}
-        else:
-            queues = set()
-
-        url = "https://{platform}.api.riotgames.com/lol/match/v4/matchlists/by-account/{accountId}".format(platform=query["platform"].value.lower(), accountId=query["accountId"])
+        url = f"https://{continent}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?type={type_.value.lower()}&start={start}&count={count}"
+        if queue:
+            url += f"&queue={queue.value.lower()}"
         try:
-            app_limiter, method_limiter = self._get_rate_limiter(query["platform"], "matchlists/by-account/accountId")
+            app_limiter, method_limiter = self._get_rate_limiter(continent.value, "matches/by-puuid/puuid")
             data = self._get(url, params, app_limiter=app_limiter, method_limiter=method_limiter)
         except APINotFoundError:
-            data = {"matches": []}
+            data = []
 
-        data["accountId"] = query["accountId"]
-        data["region"] = query["platform"].region.value
-        data["season"] = seasons
-        data["champion"] = champions
-        data["queue"] = queues
-        if calling_method == "by_index":
-            data["beginIndex"] = params["beginIndex"]
-            data["endIndex"] = params["endIndex"]
-            data["maxNumberOfMatches"] = query["maxNumberOfMatches"]
-        else:
-            data["beginTime"] = params["beginTime"]
-            data["endTime"] = params["endTime"]
-        for match in data["matches"]:
-            match["accountId"] = query["accountId"]
-            match["region"] = Platform(match["platformId"]).region.value
+        for i, match_id in enumerate(data):
+            data[i] = {
+                "id": match_id,
+                "continent": continent.value
+            }
         return MatchListDto(data)
 
     _validate_get_many_match_list_query = Query. \
-        has("accountIds").as_(Iterable).also. \
-        has("platform").as_(Platform).also. \
-        can_have("beginTime").as_(int).also. \
-        can_have("endTime").as_(int).also. \
+        has("puuid").as_(Iterable).also. \
+        has("continent").as_(Continent).also. \
         can_have("beginIndex").as_(int).also. \
-        can_have("endIndex").as_(int).also. \
-        can_have("seasons").as_(Iterable).also. \
-        can_have("champion.ids").as_(Iterable).also. \
-        can_have("queues").as_(Iterable)
+        can_have("maxNumberOfMatches").as_(int).also. \
+        can_have("queues").as_(Iterable).also. \
+        can_have("types").as_(Iterable)
 
     @get_many.register(MatchListDto)
     @validate_query(_validate_get_many_match_list_query, convert_region_to_platform)
     def get_many_match_list(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> Generator[MatchListDto, None, None]:
-        params = {}
-
-        if "beginIndex" in query:
-            params["beginIndex"] = query["beginIndex"]
-
-        if "endIndex" in query:
-            params["endIndex"] = query["endIndex"]
-
-        if "seasons" in query:
-            seasons = {Season(season) for season in query["seasons"]}
-            params["season"] = {SEASON_IDS[season] for season in seasons}
-        else:
-            seasons = set()
-
-        if "champion.ids" in query:
-            params["champion"] = {query["champion.ids"]}
-
-        if "queues" in query:
-            queues = {Queue(queue) for queue in query["queues"]}
-            params["queue"] = {QUEUE_IDS[queue] for queue in queues}
-        else:
-            queues = set()
-
-        def generator():
-            for id in query["accountIds"]:
-                url = "https://{platform}.api.riotgames.com/lol/match/v4/matchlists/by-account/{accountId}".format(platform=query["platform"].value.lower(), accountId=id)
-                try:
-                    app_limiter, method_limiter = self._get_rate_limiter(query["platform"], "matchlists/by-account/accountId")
-                    data = self._get(url, params, app_limiter=app_limiter, method_limiter=method_limiter)
-                except APINotFoundError as error:
-                    raise NotFoundError(str(error)) from error
-
-                data["accountId"] = id
-                data["region"] = query["platform"].region.value
-                if "beginIndex" in query:
-                    data["beginIndex"] = query["beginIndex"]
-                if "endIndex" in query:
-                    data["endIndex"] = query["endIndex"]
-                if "seasons" in query:
-                    data["seasons"] = seasons
-                if "champion.ids" in query:
-                    data["champion"] = params["champion"]
-                if "queues" in query:
-                    params["queue"] = queues
-                yield MatchListDto(data)
-
-        return generator()
+        raise NotImplementedError()
 
     _validate_get_timeline_query = Query. \
         has("id").as_(int).also. \

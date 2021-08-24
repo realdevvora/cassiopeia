@@ -20,6 +20,31 @@ class Region(Enum):
         return getattr(Platform, self.name)
 
     @property
+    def continent(self) -> "Continent":  # TODO: Add this for platform as well
+        if self is Region.brazil:
+            return Continent.americas
+        if self is Region.europe_north_east:
+            return Continent.europe
+        if self is Region.europe_west:
+            return Continent.europe
+        if self is Region.japan:
+            return Continent.asia
+        if self is Region.korea:
+            return Continent.asia
+        if self is Region.latin_america_north:
+            return Continent.americas
+        if self is Region.latin_america_south:
+            return Continent.americas
+        if self is Region.north_america:
+            return Continent.americas
+        if self is Region.oceania:
+            return Continent.asia  # TODO: Correct?
+        if self is Region.turkey:
+            return Continent.europe
+        if self is Region.russia:
+            return Continent.europe
+
+    @property
     def default_locale(self) -> str:
         return DEFAULT_LOCALE[self]
 
@@ -103,6 +128,12 @@ DEFAULT_LOCALE = {
 }
 
 
+class Continent(Enum):
+    americas = "AMERICAS"
+    asia = "ASIA"
+    europe = "EUROPE"
+
+
 class Key(Enum):
     Q = "Q"
     W = "W"
@@ -129,6 +160,13 @@ class Resource(Enum):
 class Side(Enum):
     blue = 100
     red = 200
+
+
+class MatchType(Enum):  # TODO: Can we combine with GameType somehow?
+    ranked = "ranked"
+    normal = "normal"
+    tourney = "tourney"
+    tutorial = "tutorial"
 
 
 class GameMode(Enum):
