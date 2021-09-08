@@ -276,7 +276,7 @@ class CassiopeiaGhost(CassiopeiaPipelineObject, Ghost):
             if self._Ghost__is_loaded(load_group):
                 raise ValueError("object has already been loaded.")
             query = self.__get_query__()
-            if hasattr(self.__class__, "version") and "version" not in query and not self.__class__.__name__ == "Realms":
+            if hasattr(self.__class__, "version") and "version" not in query and self.__class__.__name__ not in ["Realms", "Match"]:
                 query["version"] = get_latest_version(region=query["region"], endpoint=None)
             data = configuration.settings.pipeline.get(type=self._load_types[load_group], query=query)
             self.__load_hook__(load_group, data)

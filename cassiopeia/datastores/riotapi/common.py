@@ -55,7 +55,6 @@ _ERROR_CODES = {
 T = TypeVar("T")
 
 
-
 class RiotAPIRateLimiter(MultiRateLimiter):
     # The application limiter and method limiters will each be an instance of this.
 

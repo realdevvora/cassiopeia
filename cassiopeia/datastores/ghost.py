@@ -1,10 +1,9 @@
-from typing import Type, TypeVar, MutableMapping, Any, Iterable, Union
-import arrow
+from typing import Type, TypeVar, MutableMapping, Any, Iterable
 import copy
 
 from datapipelines import DataSource, PipelineContext, Query, validate_query
 
-from ..data import Platform, Queue, Tier, Division
+from ..data import Platform, Queue, Tier, Division, Continent, Region
 from ..core import Champion, Rune, Item, Map, SummonerSpell, Realms, ProfileIcon, LanguageStrings, Summoner, ChampionMastery, Match, CurrentMatch, ShardStatus, ChallengerLeague, GrandmasterLeague, MasterLeague, League, MatchHistory, Items, Champions, Maps, ProfileIcons, Locales, Runes, SummonerSpells, Versions, ChampionMasteries, LeagueEntries, FeaturedMatches, VerificationString
 from ..core.match import Timeline, MatchListData
 from ..core.championmastery import ChampionMasteryListData
@@ -176,23 +175,20 @@ class UnloadedGhostStore(DataSource):
         has("platform").as_(Platform)
 
     _validate_get_match_query = Query. \
-        has("id").as_(int).also. \
-        has("platform").as_(Platform)
+        has("id").as_(str).also. \
+        has("continent").as_(Continent).or_("region").as_(Region).or_("platform").as_(Platform)
 
     _validate_get_match_history_query = Query. \
-        has("accountId").as_(str).also. \
-        has("platform").as_(Platform).also. \
-        can_have("beginTime").as_(int).also. \
-        can_have("endTime").as_(int).also. \
+        has("puuid").as_(str).also. \
+        has("continent").as_(Continent).or_("region").as_(Region).or_("platform").as_(Platform).also. \
         can_have("beginIndex").as_(int).also. \
-        can_have("endIndex").as_(int).also. \
-        can_have("seasons").as_(Iterable).also. \
-        can_have("champion.ids").as_(Iterable).also. \
-        can_have("queues").as_(Iterable)
+        can_have("maxNumberOfMatches").as_(float).also. \
+        can_have("queue").as_(Iterable).also. \
+        can_have("type").as_(Iterable)
 
     _validate_get_timeline_query = Query. \
-        has("id").as_(int).also. \
-        has("platform").as_(Platform)
+        has("id").as_(str).also. \
+        has("continent").as_(Continent).or_("region").as_(Region).or_("platform").as_(Platform)
 
     _validate_get_shard_status_query = Query. \
         has("platform").as_(Platform)
@@ -249,7 +245,7 @@ class UnloadedGhostStore(DataSource):
 
     @get.register(ProfileIcon)
     @validate_query(_validate_get_profile_icon_query, convert_region_to_platform)
-    def get_profile_icons(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> ProfileIcon:
+    def get_profile_icon(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> ProfileIcon:
         query["region"] = query.pop("platform").region
         return ProfileIcon._construct_normally(**query)
 
@@ -285,15 +281,17 @@ class UnloadedGhostStore(DataSource):
         return ChampionMastery._construct_normally(**query)
 
     @get.register(Match)
-    @validate_query(_validate_get_match_query, convert_region_to_platform)
+    @validate_query(_validate_get_match_query)
     def get_match(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> Match:
-        query["region"] = query.pop("platform").region
+        if "region" in query:
+            query["continent"] = query["region"].continent
         return Match._construct_normally(**query)
 
     @get.register(Timeline)
-    @validate_query(_validate_get_timeline_query, convert_region_to_platform)
-    def get_match(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> Timeline:
-        query["region"] = query.pop("platform").region
+    @validate_query(_validate_get_timeline_query)
+    def get_match_timeline(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> Timeline:
+        if "region" in query:
+            query["continent"] = query["region"].continent
         return Timeline._construct_normally(**query)
 
     @get.register(CurrentMatch)
@@ -379,31 +377,22 @@ class UnloadedGhostStore(DataSource):
         return VerificationString._construct_normally(**query)
 
     @get.register(MatchHistory)
-    @validate_query(_validate_get_match_history_query, convert_region_to_platform)
+    @validate_query(_validate_get_match_history_query)
     def get_match_history(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> MatchHistory:
-        original_query = copy.deepcopy(query)
-        region = query["region"]
-        account_id = query["accountId"]
+        if "region" in query:
+            query["continent"] = query["region"].continent
+        continent = query["continent"]
+        puuid = query["puuid"]
         begin_index = query.get("beginIndex", 0)
-        end_index = query.get("endIndex", None)
-        first_requested_dt = query.get("beginTime", 0)  # (begin_time) Defaults to start of summoner's match history
-        most_recent_requested_dt = query.get("endTime", None)  # (end_time) Defaults to now; end_time > begin_time
-        queues = query.get("queues", {})
-        seasons = query.get("seasons", {})
-        champion_ids = query.get("champion.ids", {})
+        count = query.get("maxNumberOfMatches", None)
+        queue = query.get("queue", None)
+        type = query.get("type", None)
 
-        max_number_of_requested_matches = float("inf") if end_index is None else end_index - begin_index
-
-        # Convert times to datetimes
-        first_requested_dt = arrow.get(first_requested_dt / 1000)
-        if most_recent_requested_dt is not None:
-            most_recent_requested_dt = arrow.get(most_recent_requested_dt / 1000)
-            assert most_recent_requested_dt > first_requested_dt
+        max_number_of_requested_matches = float("inf") if count is None else count
 
         # Create the generator that will populate the match history object.
-        def generate_matchlists(begin_index: int, max_number_of_requested_matches: int = None, first_requested_dt: arrow.Arrow = None, most_recent_requested_dt: Union[arrow.Arrow, None] = None):
+        def generate_matchlists(begin_index: int, max_number_of_requested_matches: int = None):
             _begin_index = begin_index
-            _current_first_requested_dt = first_requested_dt
 
             if isinstance(max_number_of_requested_matches, int):
                 max_number_of_requested_matches = float(max_number_of_requested_matches)
@@ -411,67 +400,37 @@ class UnloadedGhostStore(DataSource):
             pulled_matches = 0
             while pulled_matches < max_number_of_requested_matches:
                 new_query = {
-                    "region": region,
-                    "accountId": account_id,
-                    "queues": queues,
-                    "seasons": seasons,
-                    "champion.ids": champion_ids,
+                    "continent": continent,
+                    "puuid": puuid,
                     "beginIndex": _begin_index,
-                    "beginTime": _current_first_requested_dt.int_timestamp * 1000,
-                    "maxNumberOfMatches": max_number_of_requested_matches
+                    "count": max_number_of_requested_matches
                 }
-                if "endTime" in original_query:
-                    new_query["endTime"] = original_query["endTime"]
+                if queue is not None:
+                    new_query["queue"] = queue
+                if type is not None:
+                    new_query["type"] = type
 
                 data = context[context.Keys.PIPELINE].get(MatchListData, query=new_query)
                 matchrefdata = None
                 for matchrefdata in data:
                     pulled_matches += 1
-                    if pulled_matches > 0 and (most_recent_requested_dt is None or matchrefdata.creation < most_recent_requested_dt) and matchrefdata.creation > first_requested_dt:
+                    if pulled_matches > 0:
                         match = Match.from_match_reference(matchrefdata)
-                        yield  match
+                        yield match
                     if pulled_matches >= max_number_of_requested_matches:
-                        break
-                    if first_requested_dt is not None and matchrefdata.creation <= first_requested_dt:
                         break
 
                 matches_pulled_this_iteration = len(data)
-                if hasattr(data, "endIndex"):
-                    expected_pulled_matches_this_iteration = data.endIndex - data.beginIndex
-                else:
-                    expected_pulled_matches_this_iteration = None
-                if expected_pulled_matches_this_iteration is not None and matches_pulled_this_iteration < expected_pulled_matches_this_iteration:
+                if matches_pulled_this_iteration < count:
                     # Stop because the API returned less data than we asked for, and so there isn't any more left
                     break
 
-                if most_recent_requested_dt is not None and matchrefdata is not None and matchrefdata.creation >= most_recent_requested_dt:
-                    # Stop because we have gotten all the matches in the requested time range
-                    break
-
                 # Update the "start" values for the next iteration of calls
-                if hasattr(data, "endIndex"):
-                    _begin_index = data.endIndex
-                # else: Don't update _begin_index
-                if hasattr(data, "beginTime"):
-                    _current_first_requested_dt = arrow.get(data.beginTime / 1000)
-                    _earliest_dt_in_current_match_history = _current_first_requested_dt
-                else:
-                    _earliest_dt_in_current_match_history = matchrefdata.creation
-                # else: Don't update _current_first_requested_dt
-                max_number_of_requested_matches -= len(data)
+                _begin_index = _begin_index + count
 
-                if first_requested_dt is not None and _earliest_dt_in_current_match_history <= first_requested_dt:
-                    # Stop because we have gotten all the matches in the requested time range
-                    break
+        generator = generate_matchlists(begin_index, max_number_of_requested_matches)
 
-        generator = generate_matchlists(begin_index, max_number_of_requested_matches, first_requested_dt, most_recent_requested_dt)
-
-        summoner = Summoner(account_id=account_id, region=region)
-        generator = MatchHistory.from_generator(generator=generator, summoner=summoner,
-                                                begin_index=begin_index, end_index=end_index,
-                                                begin_time=first_requested_dt,
-                                                end_time=most_recent_requested_dt,
-                                                queues=queues, seasons=seasons, champions=champion_ids)
+        generator = MatchHistory.from_generator(generator=generator, continent=continent, puuid=puuid, begin_index=begin_index, end_index=max_number_of_requested_matches, queue=queue, type=type)
         return generator
 
     @get.register(Items)
@@ -594,7 +553,7 @@ class UnloadedGhostStore(DataSource):
 
     @get.register(ChampionMasteries)
     @validate_query(_validate_get_champion_masteries_query, convert_region_to_platform)
-    def get_versions(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> ChampionMasteries:
+    def get_champion_masteries(self, query: MutableMapping[str, Any], context: PipelineContext = None) -> ChampionMasteries:
         def champion_masteries_generator(query):
             from ..transformers.championmastery import ChampionMasteryTransformer
             all_champion_ids = [champion.id for champion in Champions(region=query["region"])]
@@ -623,8 +582,6 @@ class UnloadedGhostStore(DataSource):
             "summoner": Summoner(id=query["summoner.id"], region=query["region"])
         }
         return ChampionMasteries.from_generator(generator=champion_masteries_generator(query), **kwargs)
-
-
 
     @get.register(FeaturedMatches)
     @validate_query(_validate_get_featured_matches_query, convert_region_to_platform)

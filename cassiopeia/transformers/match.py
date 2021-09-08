@@ -31,20 +31,15 @@ class MatchTransformer(DataTransformer):
     @transform.register(MatchListDto, MatchListData)
     def matchlist_dto_to_data(self, value: MatchListDto, context: PipelineContext = None) -> MatchListData:
         kwargs = {
-            "region": value["region"],
-            "accountId": value["accountId"],
-            "season": value["season"],
+            "continent": value["continent"],
+            "puuid": value["puuid"],
+            "type": value["type"],
             "queue": value["queue"],
-            "champion": value["champion"],
         }
         if "beginIndex" in value:
             kwargs["beginIndex"] = value["beginIndex"]
-            kwargs["endIndex"] = value["endIndex"]
             kwargs["maxNumberOfMatches"] = value.get("maxNumberOfMatches", None),
-        if "beginTime" in value:
-            kwargs["beginTime"] = value["beginTime"]
-            kwargs["endTime"] = value["endTime"]
-        return MatchListData([self.match_reference_dto_to_data(match) for match in value["matches"]], **kwargs)
+        return MatchListData([self.match_reference_dto_to_data({"id": id, "continent": value["continent"]}) for id in value["match_ids"]], **kwargs)
 
     @transform.register(TimelineDto, TimelineData)
     def timeline_dto_to_data(self, value: TimelineDto, context: PipelineContext = None) -> TimelineData:

@@ -20,7 +20,7 @@ class Region(Enum):
         return getattr(Platform, self.name)
 
     @property
-    def continent(self) -> "Continent":  # TODO: Add this for platform as well
+    def continent(self) -> "Continent":
         if self is Region.brazil:
             return Continent.americas
         if self is Region.europe_north_east:
@@ -100,6 +100,10 @@ class Platform(Enum):
             return region.platform
         except AttributeError:
             return Region(region).platform
+
+    @property
+    def continent(self):
+        return self.region.continent
 
 
 DEFAULT_LOCALE = {

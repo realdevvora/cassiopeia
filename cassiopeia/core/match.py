@@ -1,4 +1,5 @@
 import functools
+import itertools
 import arrow
 import datetime
 from collections import Counter
@@ -158,8 +159,10 @@ class ParticipantData(CoreData):
     def __call__(self, **kwargs):
         perks = kwargs.pop("perks", {})
         stat_perks = perks.pop("statPerks", {})
-        styles = perks.pop("styles", {}).get("selections", [])  # Getting the selections drops some minor info
-        self.perks = {style["perk"]: [style.pop("var1"), style.pop("var2"), style.pop("var3")] for style in styles}
+        # We're going to drop some info about the perks here because that info is already available from the static data
+        styles = perks.pop("styles", [])
+        selections = list(itertools.chain(*[s.get("selections", []) for s in styles]))
+        self.perks = {s["perk"]: [s.pop("var1"), s.pop("var2"), s.pop("var3")] for s in selections}
         self.stat_perks = stat_perks
         # self.stats = ParticipantStatsData(**stats)  # TODO: Figure out what we want to do with particpant stats now that they have moved onto the participant
         if "timeline" in kwargs:
@@ -216,7 +219,7 @@ class MatchData(CoreData):
             self.privateGame = True
         self.participants = []
         for participant in participants:
-            participant = ParticipantData(**participant)
+            participant = ParticipantData(**participant, platformId=kwargs["platformId"])
             self.participants.append(participant)
 
         teams = kwargs.pop("teams", [])
@@ -242,23 +245,18 @@ class MatchHistory(CassiopeiaLazyList):  # type: List[Match]
     """The match history for a summoner. By default, this will return the entire match history."""
     _data_types = {MatchListData}
 
-    def __init__(self, *, summoner: Summoner, begin_index: int = None, end_index: int = None, queue: Queue = None, type: MatchType = None):
+    def __init__(self, *, continent: Continent, puuid: str, begin_index: int = None, end_index: int = None, queue: Queue = None, type: MatchType = None):
         assert end_index is None or end_index > begin_index
-        kwargs = {"continent": summoner.region.continent}
+        kwargs = {"continent": continent, "puuid": puuid}
         kwargs["queue"] = queue
         kwargs["type"] = type
         kwargs["begin_index"] = begin_index
         kwargs["end_index"] = end_index
-        assert isinstance(summoner, Summoner)
-        self.__puuid_callable = lambda: summoner.puuid
-        self.__summoner = summoner
         CassiopeiaObject.__init__(self, **kwargs)
 
     @classmethod
-    def __get_query_from_kwargs__(cls, *, summoner: Summoner, begin_index: int = None, end_index: int = None, queue: Queue = None, type: MatchType = None):
-        assert isinstance(summoner, Summoner)
-        query = {"continent": summoner.region.continent}
-        query["puuid"] = summoner.puuid
+    def __get_query_from_kwargs__(cls, *, continent: Continent, puuid: str, begin_index: int = None, end_index: int = None, queue: Queue = None, type: MatchType = None):
+        query = {"continent": continent, "puuid": puuid}
 
         if begin_index is not None:
             query["beginIndex"] = begin_index
@@ -266,34 +264,25 @@ class MatchHistory(CassiopeiaLazyList):  # type: List[Match]
         if end_index is not None:
             query["endIndex"] = end_index  # TODO: Figure out how we want this to work with maxNumberOfMatches
 
-        query["queue"] = queue
-        query["type"] = type
+        if queue is not None:
+            query["queue"] = queue
+
+        if type is not None:
+            query["type"] = type
         return query
 
     @classmethod
-    def from_generator(cls, generator: Generator, summoner: Summoner, **kwargs):
+    def from_generator(cls, generator: Generator, **kwargs):
         self = cls.__new__(cls)
-        kwargs["summoner"] = summoner
-        self.__summoner = summoner
         CassiopeiaLazyList.__init__(self, generator=generator, **kwargs)
         return self
 
     def __call__(self, **kwargs) -> "MatchHistory":
-        kwargs.setdefault("summoner", self.__summoner)
         kwargs.setdefault("begin_index", self.begin_index)
         kwargs.setdefault("end_index", self.end_index)
         kwargs.setdefault("queue", self.queue)
         kwargs.setdefault("type", self.type)
         return MatchHistory(**kwargs)
-
-    @property
-    def _puuid(self):  # TODO: I don't think we need this anymore
-        try:
-            return self.__puuid
-        except AttributeError:
-            self.__puuid = self.__puuid_callable()
-            del self.__puuid_callable  # This releases the reference to the summoner
-            return self.__puuid
 
     @lazy_property
     def continent(self) -> Continent:
@@ -1348,8 +1337,8 @@ class Participant(CassiopeiaObject):
             kwargs["name"] = self._data[ParticipantData].summonerName
         except AttributeError:
             pass
-        kwargs["account_id"] = self._data[ParticipantData].currentAccountId
-        kwargs["region"] = Platform(self._data[ParticipantData].currentPlatformId).region
+        kwargs["puuid"] = self._data[ParticipantData].puuid
+        kwargs["region"] = Platform(self._data[ParticipantData].platformId).region
         summoner = Summoner(**kwargs)
         try:
             summoner(profileIconId=self._data[ParticipantData].profileIconId)
@@ -1457,7 +1446,11 @@ class Match(CassiopeiaGhost):
     _data_types = {MatchData}
 
     @provide_default_region
-    def __init__(self, *, id: int = None, continent: Union[Continent, str] = None):
+    def __init__(self, *, id: int = None, continent: Union[Continent, str] = None, region: Union[Region, str] = None):
+        if isinstance(region, str):
+            region = Region(region)
+        if region is not None:
+            continent = region.continent
         kwargs = {"continent": continent, "id": id}
         super().__init__(**kwargs)
         self.__participants = []  # For lazy-loading the participants in a special way
@@ -1492,6 +1485,14 @@ class Match(CassiopeiaGhost):
     @property
     def id(self) -> int:
         return self._data[MatchData].id
+
+    @property
+    def platform(self) -> Region:
+        return Platform(self.participants[0].platformId)
+
+    @property
+    def region(self) -> Region:
+        return Platform(self.participants[0].platformId).region
 
     @lazy_property
     def timeline(self) -> Timeline:

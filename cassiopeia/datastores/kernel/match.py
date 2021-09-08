@@ -28,7 +28,7 @@ class MatchAPI(KernelSource):
         pass
 
     _validate_get_match_query = Query. \
-        has("id").as_(int).also. \
+        has("id").as_(str).also. \
         has("platform").as_(Platform)
 
     @get.register(MatchDto)
@@ -64,7 +64,7 @@ class MatchAPI(KernelSource):
                     data = self._get(endpoint=endpoint, parameters=parameters)
                 except APINotFoundError as error:
                     raise NotFoundError(str(error)) from error
-                
+
                 for participant in data["participants"]:
                     participant.setdefault("runes", [])
                 for p in data["participantIdentities"]:
